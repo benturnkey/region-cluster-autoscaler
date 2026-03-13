@@ -122,14 +122,6 @@ func (p *multiRegionCloudProvider) providerForNode(node *apiv1.Node) cloudprovid
 	return nil
 }
 
-func (p *multiRegionCloudProvider) providerByRegion(region string) cloudprovider.CloudProvider {
-	for _, provider := range p.providers {
-		if provider.region == region {
-			return provider.provider
-		}
-	}
-	return nil
-}
 
 func (p *multiRegionCloudProvider) Name() string {
 	return cloudprovider.AwsProviderName

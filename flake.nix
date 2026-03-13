@@ -18,6 +18,7 @@
             gotools
             golangci-lint
             setup-envtest
+            gh
           ];
 
           shellHook = ''

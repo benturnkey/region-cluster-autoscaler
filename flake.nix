@@ -17,8 +17,14 @@
             gopls
             gotools
             golangci-lint
+            setup-envtest
             gh
           ];
+
+          shellHook = ''
+            export KUBEBUILDER_ASSETS="$(setup-envtest use 1.35.0 -p path)"
+          '';
+
         };
  });
 }

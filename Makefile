@@ -38,6 +38,20 @@ $(OCI_OUTPUT): $(DOCKER_SOURCES)
 		-f Containerfile \
 		.
 
+.PHONY: oci-load
+oci-load: $(DOCKER_SOURCES)
+	DOCKER_BUILDKIT=1 \
+	SOURCE_DATE_EPOCH=1 \
+	docker buildx build \
+		--build-arg VERSION=$(VERSION) \
+		--tag $(OCI_REGISTRY)/$(OCI_IMAGE_NAME) \
+		--progress=plain \
+		--platform=$(OCI_PLATFORM) \
+		--label "org.opencontainers.image.source=https://github.com/tkhq/cluster-autoscaler-provider" \
+		--load \
+		-f Containerfile \
+		.
+
 .PHONY: test
 test:
 	mkdir -p $(GOCACHE) $(GOMODCACHE)

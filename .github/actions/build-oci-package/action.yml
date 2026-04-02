@@ -13,6 +13,11 @@ inputs:
     type: boolean
     required: false
     default: false
+  load-docker:
+    description: build and load the image into the local Docker daemon instead of exporting an OCI layout directory
+    type: boolean
+    required: false
+    default: false
 
 # NB: I tried wrapping these as artifacts, but the artifact system is so incredibly slow (even v4, which is supposed to offer a 90% improvement) that it is not even remotely worth it.
 # Both upload and download are slow; they each take more than an order of magnitude more time than cache operations.
@@ -25,7 +30,11 @@ runs:
         echo "Setting timestamps of everything in out to now, to trick make into accepting cached dependencies..."
         if [ -d out ]; then find out/ -exec touch {} +; fi
         echo "Building ${{ inputs.name }}..."
-        make VERSION=${{ inputs.version }} OCI_IMAGE_NAME=${{ inputs.name }} -j"$(nproc)" oci
+        target=oci
+        if [[ "${{ inputs.load-docker }}" == 'true' ]]; then
+          target=oci-load
+        fi
+        make VERSION=${{ inputs.version }} OCI_IMAGE_NAME=${{ inputs.name }} -j"$(nproc)" "${target}"
 
     - name: artifact
       if: ${{ inputs.disable-artifact == 'false' }}

@@ -66,10 +66,7 @@ jobs:
           name: ${{ env.IMAGE_NAME }}
           version: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
           disable-artifact: true
-
-      - name: Load artifact to Docker
-        run: |
-          env -C out/${{ env.IMAGE_NAME }} tar -cf - . | docker load
+          load-docker: true
 
       - name: Upload to GHCR
         if: ${{ env.TAGS != '' }}

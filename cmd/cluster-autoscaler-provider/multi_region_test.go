@@ -92,6 +92,68 @@ func TestMultiRegionNodeGroupForNodeRoutesByRegion(t *testing.T) {
 	}
 }
 
+func TestRegionalNodeGroupMutationsSetRegionLogScope(t *testing.T) {
+	testCases := []struct {
+		name string
+		call func(group *regionalNodeGroup) error
+	}{
+		{
+			name: "IncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.IncreaseSize(1)
+			},
+		},
+		{
+			name: "AtomicIncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.AtomicIncreaseSize(1)
+			},
+		},
+		{
+			name: "DeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.DeleteNodes(nil)
+			},
+		},
+		{
+			name: "ForceDeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.ForceDeleteNodes(nil)
+			},
+		},
+		{
+			name: "DecreaseTargetSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.DecreaseTargetSize(1)
+			},
+		},
+		{
+			name: "Delete",
+			call: func(group *regionalNodeGroup) error {
+				return group.Delete()
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutatingGroup := &scopeCheckingNodeGroup{}
+			group := &regionalNodeGroup{
+				region: "us-west-2",
+				group:  mutatingGroup,
+			}
+
+			if err := tc.call(group); err != nil {
+				t.Fatalf("%s() error = %v", tc.name, err)
+			}
+
+			if mutatingGroup.seenRegion != "us-west-2" {
+				t.Fatalf("%s() active region = %q, want %q", tc.name, mutatingGroup.seenRegion, "us-west-2")
+			}
+		})
+	}
+}
+
 type fakeCloudProvider struct {
 	groups                []cloudprovider.NodeGroup
 	nodeGroupForNode      map[string]cloudprovider.NodeGroup
@@ -164,5 +226,69 @@ func (f *fakeNodeGroup) Create() (cloudprovider.NodeGroup, error)       { return
 func (f *fakeNodeGroup) Delete() error                                  { return nil }
 func (f *fakeNodeGroup) Autoprovisioned() bool                          { return false }
 func (f *fakeNodeGroup) GetOptions(config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
+
+type scopeCheckingNodeGroup struct {
+	seenRegion string
+}
+
+func (g *scopeCheckingNodeGroup) captureRegion() {
+	if region := activeLogRegion.Load(); region != nil {
+		g.seenRegion = *region
+	}
+}
+
+func (g *scopeCheckingNodeGroup) MaxSize() int { return 10 }
+
+func (g *scopeCheckingNodeGroup) MinSize() int { return 1 }
+
+func (g *scopeCheckingNodeGroup) TargetSize() (int, error) { return 1, nil }
+
+func (g *scopeCheckingNodeGroup) IncreaseSize(int) error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) AtomicIncreaseSize(int) error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) DeleteNodes([]*apiv1.Node) error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) ForceDeleteNodes([]*apiv1.Node) error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) DecreaseTargetSize(int) error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) Id() string { return "scope-check" }
+
+func (g *scopeCheckingNodeGroup) Debug() string { return "scope-check" }
+
+func (g *scopeCheckingNodeGroup) Nodes() ([]cloudprovider.Instance, error) { return nil, nil }
+
+func (g *scopeCheckingNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) { return nil, nil }
+
+func (g *scopeCheckingNodeGroup) Exist() bool { return true }
+
+func (g *scopeCheckingNodeGroup) Create() (cloudprovider.NodeGroup, error) { return g, nil }
+
+func (g *scopeCheckingNodeGroup) Delete() error {
+	g.captureRegion()
+	return nil
+}
+
+func (g *scopeCheckingNodeGroup) Autoprovisioned() bool { return false }
+
+func (g *scopeCheckingNodeGroup) GetOptions(config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
 	return nil, cloudprovider.ErrNotImplemented
 }

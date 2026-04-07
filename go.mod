@@ -144,6 +144,8 @@ replace github.com/aws/aws-sdk-go/service/eks => github.com/aws/aws-sdk-go/servi
 
 replace github.com/rancher/go-rancher => github.com/rancher/go-rancher v0.1.0
 
+replace k8s.io/autoscaler/cluster-autoscaler => ./third_party/cluster-autoscaler
+
 replace k8s.io/api => k8s.io/api v0.35.0
 
 replace k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.35.0

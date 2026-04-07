@@ -1,0 +1,17 @@
+approvers:
+- feiskyer
+- nilo19
+- tallaxes
+- comtalyst
+- jackfrancis
+reviewers:
+- feiskyer
+- nilo19
+- tallaxes
+- comtalyst
+- jackfrancis
+emeritus_approvers:
+- marwanad
+
+labels:
+- area/provider/azure

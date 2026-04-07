@@ -4,8 +4,9 @@ FROM stagex/pallet-go:1.25.5@sha256:ba4285c7c169936c6be99d7c0197438f858536226d9f
 # Set the Current Working Directory inside the container
 WORKDIR /app
 
-# Copy go mod and sum files
+# Copy go mod and sum files for the main module and the local autoscaler fork.
 COPY go.mod go.sum ./
+COPY third_party/cluster-autoscaler/go.mod third_party/cluster-autoscaler/go.sum ./third_party/cluster-autoscaler/
 
 # Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download

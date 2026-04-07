@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler-provider
+  namespace: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler-provider
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler-provider
+    spec:
+      serviceAccountName: cluster-autoscaler-provider
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: cluster-autoscaler-provider
+          image: cluster-autoscaler-provider:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --v=4
+            - --stderrthreshold=info
+            - --address=:8086
+            - --cluster-name=$(CLUSTER_NAME)
+            - --aws-region=us-east-1
+            - --aws-region=us-west-2
+            - --node-group-auto-discovery=$(CLUSTER_AUTOSCALER_NODE_GROUP_AUTO_DISCOVERY)
+          env:
+            - name: CLUSTER_NAME
+              value: dev
+            - name: CLUSTER_AUTOSCALER_NODE_GROUP_AUTO_DISCOVERY
+              value: asg:tag=k8s.io/cluster-autoscaler/$(CLUSTER_NAME)
+          ports:
+            - name: grpc
+              containerPort: 8086
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 100m
+              memory: 300Mi

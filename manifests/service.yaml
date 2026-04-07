@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster-autoscaler-provider
+  labels:
+    app: cluster-autoscaler-provider
+spec:
+  selector:
+    app: cluster-autoscaler-provider
+  ports:
+    - name: grpc
+      port: 8086
+      targetPort: 8086
+      protocol: TCP

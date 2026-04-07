@@ -41,14 +41,30 @@ jobs:
     env:
       IMAGE_NAME: cluster-autoscaler-provider
       IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/cluster-autoscaler-provider
-      TAGS: >-
-        ${{ github.ref == format('refs/heads/{0}', 'main') && 'latest' || '' }}
-        ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || '' }}
-        ${{ github.event_name != 'pull_request' && github.ref_name || '' }}
       RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v5
+
+      - name: Compute image tags
+        id: image_tags
+        shell: bash
+        run: |
+          declare -a tags=()
+
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            tags+=(latest)
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            tags+=("pr-${{ github.event.number }}")
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tags+=("${GITHUB_REF_NAME}")
+          elif [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            tags+=("sha-${GITHUB_SHA::12}")
+          fi
+
+          printf 'tags=%s\n' "${tags[*]}" >> "${GITHUB_OUTPUT}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -69,7 +85,9 @@ jobs:
           load-docker: true
 
       - name: Upload to GHCR
-        if: ${{ env.TAGS != '' }}
+        if: ${{ steps.image_tags.outputs.tags != '' }}
+        env:
+          TAGS: ${{ steps.image_tags.outputs.tags }}
         run: |
           for tag in ${TAGS}; do
             docker tag "tkhq/${IMAGE_NAME}:latest" "${IMAGE_REPO}:${tag}"

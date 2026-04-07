@@ -56,6 +56,8 @@ func buildProviderForRegion(
 ) cloudprovider.CloudProvider {
 	awsRegionEnvMu.Lock()
 	defer awsRegionEnvMu.Unlock()
+	endRegionLogScope := beginRegionLogScope(region)
+	defer endRegionLogScope()
 
 	previous, hadPrevious := os.LookupEnv("AWS_REGION")
 	if err := os.Setenv("AWS_REGION", region); err != nil {
@@ -240,18 +242,24 @@ func (p *multiRegionCloudProvider) GetNodeGpuConfig(node *apiv1.Node) *cloudprov
 
 func (p *multiRegionCloudProvider) Cleanup() error {
 	for _, provider := range p.providers {
+		endRegionLogScope := beginRegionLogScope(provider.region)
 		if err := provider.provider.Cleanup(); err != nil {
+			endRegionLogScope()
 			return err
 		}
+		endRegionLogScope()
 	}
 	return nil
 }
 
 func (p *multiRegionCloudProvider) Refresh() error {
 	for _, provider := range p.providers {
+		endRegionLogScope := beginRegionLogScope(provider.region)
 		if err := provider.provider.Refresh(); err != nil {
+			endRegionLogScope()
 			return err
 		}
+		endRegionLogScope()
 	}
 	return nil
 }
@@ -284,22 +292,32 @@ func (g *regionalNodeGroup) TargetSize() (int, error) {
 }
 
 func (g *regionalNodeGroup) IncreaseSize(delta int) error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.IncreaseSize(delta)
 }
 
 func (g *regionalNodeGroup) AtomicIncreaseSize(delta int) error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.AtomicIncreaseSize(delta)
 }
 
 func (g *regionalNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.DeleteNodes(nodes)
 }
 
 func (g *regionalNodeGroup) ForceDeleteNodes(nodes []*apiv1.Node) error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.ForceDeleteNodes(nodes)
 }
 
 func (g *regionalNodeGroup) DecreaseTargetSize(delta int) error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.DecreaseTargetSize(delta)
 }
 
@@ -328,10 +346,14 @@ func (g *regionalNodeGroup) Exist() bool {
 // after NewNodeGroup. Since we do not currently support multi-region NAP,
 // we return ErrNotImplemented here as well.
 func (g *regionalNodeGroup) Create() (cloudprovider.NodeGroup, error) {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return nil, cloudprovider.ErrNotImplemented
 }
 
 func (g *regionalNodeGroup) Delete() error {
+	endRegionLogScope := beginRegionLogScope(g.region)
+	defer endRegionLogScope()
 	return g.group.Delete()
 }
 

@@ -64,7 +64,6 @@ func main() {
 	klog.InitFlags(nil)
 	kube_flag.InitFlags()
 	flag.Parse()
-	configureRegionAwareLogging()
 
 	server := newServer()
 	provider := buildAWSCloudProvider()

@@ -24,12 +24,13 @@ spec:
             - --stderrthreshold=info
             - --address=:8086
             - --cluster-name=$(CLUSTER_NAME)
-            - --aws-region=us-east-1
-            - --aws-region=us-west-2
+            - --aws-region=$(AWS_REGIONS)
             - --node-group-auto-discovery=$(CLUSTER_AUTOSCALER_NODE_GROUP_AUTO_DISCOVERY)
           env:
             - name: CLUSTER_NAME
               value: dev
+            - name: AWS_REGIONS
+              value: us-east-1,us-west-2
             - name: CLUSTER_AUTOSCALER_NODE_GROUP_AUTO_DISCOVERY
               value: asg:tag=k8s.io/cluster-autoscaler/$(CLUSTER_NAME)
           ports:

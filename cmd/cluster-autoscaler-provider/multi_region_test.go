@@ -13,6 +13,8 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	caerrors "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"github.com/prometheus/client_golang/prometheus"
 	klog "k8s.io/klog/v2"
 )
 
@@ -25,6 +27,30 @@ func TestParseAWSRegions(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseAWSRegions() = %v, want %v", got, want)
 	}
+}
+
+func TestBuildProviderForRegionMetricPanic(t *testing.T) {
+	// Reset global state for test
+	awsMetricsRegisteredOnce = false
+
+	// First call should register metrics normally.
+	// We use a dummy collector.
+	collector := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "test_metric",
+		Help: "test",
+	})
+
+	buildProviderForRegion("us-east-1", func() cloudprovider.CloudProvider {
+		legacyregistry.Registerer().MustRegister(collector)
+		return &fakeCloudProvider{}
+	})
+
+	// Second call should NOT panic even if it tries to register the SAME collector
+	// (or another collector with the same name), because we swap the registerer.
+	buildProviderForRegion("us-west-2", func() cloudprovider.CloudProvider {
+		legacyregistry.Registerer().MustRegister(collector)
+		return &fakeCloudProvider{}
+	})
 }
 
 func TestRegionFromProviderID(t *testing.T) {

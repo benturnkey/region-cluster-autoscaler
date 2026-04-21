@@ -13,10 +13,21 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"github.com/prometheus/client_golang/prometheus"
 	klog "k8s.io/klog/v2"
 )
 
-var awsRegionEnvMu sync.Mutex
+var (
+	awsRegionEnvMu           sync.Mutex
+	awsMetricsRegisteredOnce bool
+)
+
+type noopRegisterer struct{}
+
+func (n *noopRegisterer) Register(prometheus.Collector) error  { return nil }
+func (n *noopRegisterer) MustRegister(...prometheus.Collector) {}
+func (n *noopRegisterer) Unregister(prometheus.Collector) bool { return true }
 
 type regionalProvider struct {
 	region   string
@@ -81,7 +92,21 @@ func buildProviderForRegion(
 	// constructor that accepts an explicit region. We keep one upstream provider
 	// per region and scope region selection to construction time here rather than
 	// reaching into upstream internals via reflection.
-	return build()
+	//
+	// BuildAWS also registers global Prometheus metrics on every invocation, which
+	// panics if metrics are already registered. We swap the global registerer with
+	// a no-op after the first successful registration to prevent this.
+	if awsMetricsRegisteredOnce {
+		oldRegistererFunc := legacyregistry.Registerer
+		legacyregistry.Registerer = func() prometheus.Registerer {
+			return &noopRegisterer{}
+		}
+		defer func() { legacyregistry.Registerer = oldRegistererFunc }()
+	}
+
+	p := build()
+	awsMetricsRegisteredOnce = true
+	return p
 }
 
 func newMultiRegionCloudProvider(providers []regionalProvider) cloudprovider.CloudProvider {

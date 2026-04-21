@@ -108,42 +108,42 @@ func TestRegionalNodeGroupMutationsLogRegion(t *testing.T) {
 			call: func(group *regionalNodeGroup) error {
 				return group.IncreaseSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="increase_size" nodegroup="scope-check" delta=1`,
+			want: `"Increasing size" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "AtomicIncreaseSize",
 			call: func(group *regionalNodeGroup) error {
 				return group.AtomicIncreaseSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="atomic_increase_size" nodegroup="scope-check" delta=1`,
+			want: `"Atomic increasing size" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "DeleteNodes",
 			call: func(group *regionalNodeGroup) error {
 				return group.DeleteNodes(nil)
 			},
-			want: `"regional operation" region="us-west-2" op="delete_nodes" nodegroup="scope-check" node_count=0`,
+			want: `"Deleting nodes" region="us-west-2" nodegroup="scope-check" count=0`,
 		},
 		{
 			name: "ForceDeleteNodes",
 			call: func(group *regionalNodeGroup) error {
 				return group.ForceDeleteNodes(nil)
 			},
-			want: `"regional operation" region="us-west-2" op="force_delete_nodes" nodegroup="scope-check" node_count=0`,
+			want: `"Force deleting nodes" region="us-west-2" nodegroup="scope-check" count=0`,
 		},
 		{
 			name: "DecreaseTargetSize",
 			call: func(group *regionalNodeGroup) error {
 				return group.DecreaseTargetSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="decrease_target_size" nodegroup="scope-check" delta=1`,
+			want: `"Decreasing target size" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "Delete",
 			call: func(group *regionalNodeGroup) error {
 				return group.Delete()
 			},
-			want: `"regional operation" region="us-west-2" op="delete_nodegroup" nodegroup="scope-check"`,
+			want: `"Deleting nodegroup" region="us-west-2" nodegroup="scope-check"`,
 		},
 	}
 
@@ -153,6 +153,7 @@ func TestRegionalNodeGroupMutationsLogRegion(t *testing.T) {
 			group := &regionalNodeGroup{
 				region: "us-west-2",
 				group:  mutatingGroup,
+				log:    klog.Background().WithValues("region", "us-west-2", "nodegroup", mutatingGroup.Id()),
 			}
 
 			got := captureKlogOutput(t, func() {
@@ -183,42 +184,42 @@ func TestRegionalNodeGroupMutationErrorsLogRegion(t *testing.T) {
 			call: func(group *regionalNodeGroup) error {
 				return group.IncreaseSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="increase_size_failed" nodegroup="scope-check" delta=1 error="boom"`,
+			want: `"Failed to increase size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "AtomicIncreaseSize",
 			call: func(group *regionalNodeGroup) error {
 				return group.AtomicIncreaseSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="atomic_increase_size_failed" nodegroup="scope-check" delta=1 error="boom"`,
+			want: `"Failed to atomic increase size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "DeleteNodes",
 			call: func(group *regionalNodeGroup) error {
 				return group.DeleteNodes(nil)
 			},
-			want: `"regional operation" region="us-west-2" op="delete_nodes_failed" nodegroup="scope-check" node_count=0 error="boom"`,
+			want: `"Failed to delete nodes" err="boom" region="us-west-2" nodegroup="scope-check" count=0`,
 		},
 		{
 			name: "ForceDeleteNodes",
 			call: func(group *regionalNodeGroup) error {
 				return group.ForceDeleteNodes(nil)
 			},
-			want: `"regional operation" region="us-west-2" op="force_delete_nodes_failed" nodegroup="scope-check" node_count=0 error="boom"`,
+			want: `"Failed to force delete nodes" err="boom" region="us-west-2" nodegroup="scope-check" count=0`,
 		},
 		{
 			name: "DecreaseTargetSize",
 			call: func(group *regionalNodeGroup) error {
 				return group.DecreaseTargetSize(1)
 			},
-			want: `"regional operation" region="us-west-2" op="decrease_target_size_failed" nodegroup="scope-check" delta=1 error="boom"`,
+			want: `"Failed to decrease target size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
 		},
 		{
 			name: "Delete",
 			call: func(group *regionalNodeGroup) error {
 				return group.Delete()
 			},
-			want: `"regional operation" region="us-west-2" op="delete_nodegroup_failed" nodegroup="scope-check" error="boom"`,
+			want: `"Failed to delete nodegroup" err="boom" region="us-west-2" nodegroup="scope-check"`,
 		},
 	}
 
@@ -228,6 +229,7 @@ func TestRegionalNodeGroupMutationErrorsLogRegion(t *testing.T) {
 			group := &regionalNodeGroup{
 				region: "us-west-2",
 				group:  mutatingGroup,
+				log:    klog.Background().WithValues("region", "us-west-2", "nodegroup", mutatingGroup.Id()),
 			}
 
 			got := captureKlogOutput(t, func() {

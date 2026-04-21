@@ -7,6 +7,9 @@ on:
       - "**.go"
       - "go.mod"
       - "go.sum"
+      - "Containerfile"
+      - "Makefile"
+      - ".github/actions/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
@@ -14,6 +17,9 @@ on:
       - "**.go"
       - "go.mod"
       - "go.sum"
+      - "Containerfile"
+      - "Makefile"
+      - ".github/actions/**"
       - ".github/workflows/ci.yml"
 
 permissions:
@@ -21,6 +27,8 @@ permissions:
 
 env:
   GO_VERSION: "1.25.8"
+  IMAGE_NAME: cluster-autoscaler-provider
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/cluster-autoscaler-provider
 
 jobs:
   lint:
@@ -83,3 +91,34 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" -json ./... | python3 scripts/filter_govulncheck.py \
             --allow GO-2025-3521 \
             --allow GO-2025-3547
+
+  pr-image:
+    name: Build and Push PR Image
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push PR image
+        run: |
+          docker buildx build \
+            --build-arg VERSION=dev \
+            --tag "${IMAGE_REPO}:pr-${{ github.event.pull_request.number }}" \
+            --platform=linux/amd64 \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --push \
+            -f Containerfile \
+            .

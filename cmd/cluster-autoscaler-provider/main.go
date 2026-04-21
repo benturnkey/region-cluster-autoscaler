@@ -145,6 +145,7 @@ func buildAWSCloudProvider() cloudprovider.CloudProvider {
 			provider: buildProviderForRegion(region, func() cloudprovider.CloudProvider {
 				return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
 			}),
+			log: klog.Background().WithValues("region", region),
 		})
 	}
 

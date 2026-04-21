@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	apiv1 "k8s.io/api/core/v1"
@@ -11,6 +13,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	caerrors "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
+	klog "k8s.io/klog/v2"
 )
 
 func TestParseAWSRegions(t *testing.T) {
@@ -92,6 +95,173 @@ func TestMultiRegionNodeGroupForNodeRoutesByRegion(t *testing.T) {
 	}
 }
 
+var errBoom = errors.New("boom")
+
+func TestRegionalNodeGroupMutationsLogRegion(t *testing.T) {
+	testCases := []struct {
+		name string
+		call func(group *regionalNodeGroup) error
+		want string
+	}{
+		{
+			name: "IncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.IncreaseSize(1)
+			},
+			want: `"Increasing size" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "AtomicIncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.AtomicIncreaseSize(1)
+			},
+			want: `"Atomic increasing size" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "DeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.DeleteNodes(nil)
+			},
+			want: `"Deleting nodes" region="us-west-2" nodegroup="scope-check" count=0`,
+		},
+		{
+			name: "ForceDeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.ForceDeleteNodes(nil)
+			},
+			want: `"Force deleting nodes" region="us-west-2" nodegroup="scope-check" count=0`,
+		},
+		{
+			name: "DecreaseTargetSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.DecreaseTargetSize(1)
+			},
+			want: `"Decreasing target size" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "Delete",
+			call: func(group *regionalNodeGroup) error {
+				return group.Delete()
+			},
+			want: `"Deleting nodegroup" region="us-west-2" nodegroup="scope-check"`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutatingGroup := &scopeCheckingNodeGroup{}
+			group := &regionalNodeGroup{
+				region: "us-west-2",
+				group:  mutatingGroup,
+				log:    klog.Background().WithValues("region", "us-west-2", "nodegroup", mutatingGroup.Id()),
+			}
+
+			got := captureKlogOutput(t, func() {
+				if err := tc.call(group); err != nil {
+					t.Fatalf("%s() error = %v", tc.name, err)
+				}
+			})
+
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("%s() log = %q, want substring %q", tc.name, got, tc.want)
+			}
+
+			if mutatingGroup.calls != 1 {
+				t.Fatalf("%s() underlying calls = %d, want 1", tc.name, mutatingGroup.calls)
+			}
+		})
+	}
+}
+
+func TestRegionalNodeGroupMutationErrorsLogRegion(t *testing.T) {
+	testCases := []struct {
+		name string
+		call func(group *regionalNodeGroup) error
+		want string
+	}{
+		{
+			name: "IncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.IncreaseSize(1)
+			},
+			want: `"Failed to increase size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "AtomicIncreaseSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.AtomicIncreaseSize(1)
+			},
+			want: `"Failed to atomic increase size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "DeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.DeleteNodes(nil)
+			},
+			want: `"Failed to delete nodes" err="boom" region="us-west-2" nodegroup="scope-check" count=0`,
+		},
+		{
+			name: "ForceDeleteNodes",
+			call: func(group *regionalNodeGroup) error {
+				return group.ForceDeleteNodes(nil)
+			},
+			want: `"Failed to force delete nodes" err="boom" region="us-west-2" nodegroup="scope-check" count=0`,
+		},
+		{
+			name: "DecreaseTargetSize",
+			call: func(group *regionalNodeGroup) error {
+				return group.DecreaseTargetSize(1)
+			},
+			want: `"Failed to decrease target size" err="boom" region="us-west-2" nodegroup="scope-check" delta=1`,
+		},
+		{
+			name: "Delete",
+			call: func(group *regionalNodeGroup) error {
+				return group.Delete()
+			},
+			want: `"Failed to delete nodegroup" err="boom" region="us-west-2" nodegroup="scope-check"`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutatingGroup := &scopeCheckingNodeGroup{err: errBoom}
+			group := &regionalNodeGroup{
+				region: "us-west-2",
+				group:  mutatingGroup,
+				log:    klog.Background().WithValues("region", "us-west-2", "nodegroup", mutatingGroup.Id()),
+			}
+
+			got := captureKlogOutput(t, func() {
+				err := tc.call(group)
+				if !errors.Is(err, errBoom) {
+					t.Fatalf("%s() error = %v, want %v", tc.name, err, errBoom)
+				}
+			})
+
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("%s() log = %q, want structured error log %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func captureKlogOutput(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	klog.LogToStderr(false)
+	klog.SetOutput(&buf)
+	t.Cleanup(func() {
+		klog.Flush()
+		klog.LogToStderr(true)
+	})
+
+	fn()
+	klog.Flush()
+	return buf.String()
+}
+
 type fakeCloudProvider struct {
 	groups                []cloudprovider.NodeGroup
 	nodeGroupForNode      map[string]cloudprovider.NodeGroup
@@ -164,5 +334,64 @@ func (f *fakeNodeGroup) Create() (cloudprovider.NodeGroup, error)       { return
 func (f *fakeNodeGroup) Delete() error                                  { return nil }
 func (f *fakeNodeGroup) Autoprovisioned() bool                          { return false }
 func (f *fakeNodeGroup) GetOptions(config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
+
+type scopeCheckingNodeGroup struct {
+	calls int
+	err   error
+}
+
+func (g *scopeCheckingNodeGroup) MaxSize() int { return 10 }
+
+func (g *scopeCheckingNodeGroup) MinSize() int { return 1 }
+
+func (g *scopeCheckingNodeGroup) TargetSize() (int, error) { return 1, nil }
+
+func (g *scopeCheckingNodeGroup) IncreaseSize(int) error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) AtomicIncreaseSize(int) error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) DeleteNodes([]*apiv1.Node) error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) ForceDeleteNodes([]*apiv1.Node) error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) DecreaseTargetSize(int) error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) Id() string { return "scope-check" }
+
+func (g *scopeCheckingNodeGroup) Debug() string { return "scope-check" }
+
+func (g *scopeCheckingNodeGroup) Nodes() ([]cloudprovider.Instance, error) { return nil, nil }
+
+func (g *scopeCheckingNodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) { return nil, nil }
+
+func (g *scopeCheckingNodeGroup) Exist() bool { return true }
+
+func (g *scopeCheckingNodeGroup) Create() (cloudprovider.NodeGroup, error) { return g, nil }
+
+func (g *scopeCheckingNodeGroup) Delete() error {
+	g.calls++
+	return g.err
+}
+
+func (g *scopeCheckingNodeGroup) Autoprovisioned() bool { return false }
+
+func (g *scopeCheckingNodeGroup) GetOptions(config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
 	return nil, cloudprovider.ErrNotImplemented
 }

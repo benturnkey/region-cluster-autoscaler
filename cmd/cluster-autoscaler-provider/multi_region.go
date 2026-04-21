@@ -21,6 +21,7 @@ var awsRegionEnvMu sync.Mutex
 type regionalProvider struct {
 	region   string
 	provider cloudprovider.CloudProvider
+	log      klog.Logger
 }
 
 type multiRegionCloudProvider struct {
@@ -31,6 +32,7 @@ type multiRegionCloudProvider struct {
 type regionalNodeGroup struct {
 	region string
 	group  cloudprovider.NodeGroup
+	log    klog.Logger
 }
 
 func parseAWSRegions(values []string) []string {
@@ -56,6 +58,7 @@ func buildProviderForRegion(
 ) cloudprovider.CloudProvider {
 	awsRegionEnvMu.Lock()
 	defer awsRegionEnvMu.Unlock()
+	klog.Background().WithValues("region", region).Info("Building provider")
 
 	previous, hadPrevious := os.LookupEnv("AWS_REGION")
 	if err := os.Setenv("AWS_REGION", region); err != nil {
@@ -69,7 +72,7 @@ func buildProviderForRegion(
 		}
 
 		if r := recover(); r != nil {
-			klog.Errorf("panic in buildProviderForRegion for region %q: %v", region, r)
+			klog.Background().WithValues("region", region).Error(nil, "Panic in building provider", "error", r)
 			panic(r)
 		}
 	}()
@@ -129,7 +132,6 @@ func (p *multiRegionCloudProvider) providerForNode(node *apiv1.Node) cloudprovid
 	return nil
 }
 
-
 func (p *multiRegionCloudProvider) Name() string {
 	return cloudprovider.AwsProviderName
 }
@@ -141,6 +143,7 @@ func (p *multiRegionCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 			groups = append(groups, &regionalNodeGroup{
 				region: provider.region,
 				group:  group,
+				log:    klog.Background().WithValues("region", provider.region, "nodegroup", group.Id()),
 			})
 		}
 	}
@@ -240,7 +243,9 @@ func (p *multiRegionCloudProvider) GetNodeGpuConfig(node *apiv1.Node) *cloudprov
 
 func (p *multiRegionCloudProvider) Cleanup() error {
 	for _, provider := range p.providers {
+		provider.log.Info("Cleaning up provider")
 		if err := provider.provider.Cleanup(); err != nil {
+			provider.log.Error(err, "Failed to clean up provider")
 			return err
 		}
 	}
@@ -249,7 +254,9 @@ func (p *multiRegionCloudProvider) Cleanup() error {
 
 func (p *multiRegionCloudProvider) Refresh() error {
 	for _, provider := range p.providers {
+		provider.log.Info("Refreshing provider")
 		if err := provider.provider.Refresh(); err != nil {
+			provider.log.Error(err, "Failed to refresh provider")
 			return err
 		}
 	}
@@ -268,6 +275,7 @@ func wrapRegionalNodeGroup(region string, group cloudprovider.NodeGroup) cloudpr
 	return &regionalNodeGroup{
 		region: region,
 		group:  group,
+		log:    klog.Background().WithValues("region", region, "nodegroup", group.Id()),
 	}
 }
 
@@ -284,23 +292,48 @@ func (g *regionalNodeGroup) TargetSize() (int, error) {
 }
 
 func (g *regionalNodeGroup) IncreaseSize(delta int) error {
-	return g.group.IncreaseSize(delta)
+	g.log.Info("Increasing size", "delta", delta)
+	err := g.group.IncreaseSize(delta)
+	if err != nil {
+		g.log.Error(err, "Failed to increase size", "delta", delta)
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) AtomicIncreaseSize(delta int) error {
-	return g.group.AtomicIncreaseSize(delta)
+	g.log.Info("Atomic increasing size", "delta", delta)
+	err := g.group.AtomicIncreaseSize(delta)
+	if err != nil {
+		g.log.Error(err, "Failed to atomic increase size", "delta", delta)
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
-	return g.group.DeleteNodes(nodes)
+	g.log.Info("Deleting nodes", "count", len(nodes))
+	err := g.group.DeleteNodes(nodes)
+	if err != nil {
+		g.log.Error(err, "Failed to delete nodes", "count", len(nodes))
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) ForceDeleteNodes(nodes []*apiv1.Node) error {
-	return g.group.ForceDeleteNodes(nodes)
+	g.log.Info("Force deleting nodes", "count", len(nodes))
+	err := g.group.ForceDeleteNodes(nodes)
+	if err != nil {
+		g.log.Error(err, "Failed to force delete nodes", "count", len(nodes))
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) DecreaseTargetSize(delta int) error {
-	return g.group.DecreaseTargetSize(delta)
+	g.log.Info("Decreasing target size", "delta", delta)
+	err := g.group.DecreaseTargetSize(delta)
+	if err != nil {
+		g.log.Error(err, "Failed to decrease target size", "delta", delta)
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) Id() string {
@@ -328,11 +361,17 @@ func (g *regionalNodeGroup) Exist() bool {
 // after NewNodeGroup. Since we do not currently support multi-region NAP,
 // we return ErrNotImplemented here as well.
 func (g *regionalNodeGroup) Create() (cloudprovider.NodeGroup, error) {
+	g.log.Info("Create nodegroup called but not implemented")
 	return nil, cloudprovider.ErrNotImplemented
 }
 
 func (g *regionalNodeGroup) Delete() error {
-	return g.group.Delete()
+	g.log.Info("Deleting nodegroup")
+	err := g.group.Delete()
+	if err != nil {
+		g.log.Error(err, "Failed to delete nodegroup")
+	}
+	return err
 }
 
 func (g *regionalNodeGroup) Autoprovisioned() bool {

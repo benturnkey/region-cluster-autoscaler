@@ -54,19 +54,29 @@ flowchart TB
     ca -- "external gRPC" --> svc
   end
 
-  subgraph pod["Pod: cluster-autoscaler-provider"]
-    router["router container\nmode=router\ngRPC :8086\nHTTP :8080\n/config/config.yaml"]
-    cfg["ConfigMap\nbackends:\n- us-east-1 -> :8081\n- us-west-2 -> :8082"]
-    use1_provider["provider-us-east-1 container\nmode=provider\nAWS region us-east-1\ngRPC :8081"]
-    usw2_provider["provider-us-west-2 container\nmode=provider\nAWS region us-west-2\ngRPC :8082"]
+  cfg["ConfigMap\nbackends:\n- us-east-1 -> :8081\n- us-west-2 -> :8082"]
 
-    svc -- "gRPC :8086" --> router
-    cfg --> router
-    cfg --> use1_provider
-    cfg --> usw2_provider
-    router -- "localhost gRPC" --> use1_provider
-    router -- "localhost gRPC" --> usw2_provider
+  subgraph pod["Pod: cluster-autoscaler-provider"]
+    direction TB
+
+    subgraph shared["Shared network namespace and config mount"]
+      direction LR
+      router["router container\nmode=router\ngRPC :8086\nHTTP :8080"]
+      use1_provider["provider-us-east-1 container\nmode=provider\nregion us-east-1\ngRPC :8081"]
+      usw2_provider["provider-us-west-2 container\nmode=provider\nregion us-west-2\ngRPC :8082"]
+    end
+
+    mount["/etc/config/config.yaml"]
+
+    mount --> router
+    mount --> use1_provider
+    mount --> usw2_provider
+    router -- "localhost gRPC :8081" --> use1_provider
+    router -- "localhost gRPC :8082" --> usw2_provider
   end
+
+  cfg --> mount
+  svc -- "gRPC :8086" --> router
 
   subgraph aws_use1["AWS us-east-1"]
     use1_asg_a["Auto Scaling Group\nworker-use1-a"]
@@ -113,8 +123,69 @@ Required router behavior:
   worker.
 - `Refresh`: fan out to all provider workers.
 - `Cleanup`: fan out to all provider workers.
-- Health checks: probe each worker and expose aggregate readiness and health on
-  the router HTTP port.
+- Health checks: probe each worker and expose aggregate liveness, readiness, and
+  worker-count metrics on the router HTTP port.
+
+### Router Health
+
+The router exposes three HTTP endpoints:
+
+- `/healthz`: liveness only. If the router process is serving HTTP, it returns
+  `200 OK` with the current configured, healthy, and unhealthy worker counts.
+- `/ready`: readiness for Cluster Autoscaler traffic. It returns `200 OK` only
+  when at least one provider worker is currently healthy. If all workers are
+  unhealthy, it returns `503 Service Unavailable`.
+- `/metrics`: router metrics, including configured, healthy, and unhealthy
+  worker gauges.
+
+Worker health is not inferred once at startup and left alone. The router:
+
+- performs an initial worker probe when it starts
+- re-probes every configured worker every 5 seconds
+- uses `NodeGroups` as the probe RPC
+- treats probe timeouts or RPC failures as worker failures
+
+The current probe timeout is 2 seconds per worker.
+
+### Worker Failure Handling
+
+The router tracks health per configured region. A worker is marked unhealthy
+when:
+
+- the periodic `NodeGroups` probe fails
+- a routed node-group or node-based RPC to that worker fails
+- `Refresh` or `Cleanup` fanout to that worker fails
+
+When a worker call succeeds again, the router marks that worker healthy again.
+
+Failure handling is deliberately partial rather than all-or-nothing:
+
+- `NodeGroups` returns the union from healthy workers and skips failed workers.
+- `Refresh` succeeds if at least one worker refresh succeeds.
+- `Cleanup` succeeds if at least one worker cleanup succeeds.
+- Routed single-worker operations fail normally if the selected worker fails or
+  if the region cannot be derived from the request.
+
+If every worker becomes unhealthy, the router clears its cached `NodeGroups`
+state so it cannot continue serving a stale cross-region ASG view while the pod
+is unready.
+
+### ASG Refresh and Cache Behavior
+
+The router caches the aggregated `NodeGroups` response for the configured
+`cacheTTL`.
+
+That cache is invalidated when:
+
+- `Refresh` is called
+- a mutating node-group RPC succeeds, such as increase, delete-nodes, or
+  decrease-target-size
+- all workers become unhealthy
+
+`Refresh` clears the aggregated cache before fanout, then calls `Refresh` on
+every worker in parallel. This makes the next `NodeGroups` call rebuild the ASG
+view from the freshest worker state instead of reusing a stale union assembled
+before the refresh.
 
 ## Regional Provider Worker Behavior
 

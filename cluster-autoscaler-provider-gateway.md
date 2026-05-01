@@ -3,8 +3,9 @@
 ## Problem
 
 The upstream AWS Cluster Autoscaler provider assumes one AWS region per process.
-This wrapper currently tries to construct multiple upstream AWS providers in one
-process so a single external gRPC provider can cover a multi-region cluster.
+This wrapper needs to serve a multi-region cluster through one external gRPC
+endpoint, which means it cannot safely construct multiple upstream AWS
+providers in one process.
 
 That collides with upstream process-global metrics registration. The AWS provider
 registers `cluster_autoscaler_aws_request_duration_seconds` through
@@ -15,139 +16,161 @@ the same process tries to register the same collector again and panics with:
 duplicate metrics collector registration attempted
 ```
 
-Making registration idempotent would prevent the panic, but it would not provide
-per-region AWS metrics. The upstream metric labels are `endpoint` and `status`;
-they do not include region.
+Making registration idempotent would prevent the panic, but it would still mix
+all AWS request metrics in one process because the upstream metric labels are
+`endpoint` and `status`; they do not include region.
 
 ## Proposal
 
-Run one upstream AWS provider process per AWS region, and put a small
-cluster-autoscaler-provider gateway in front of them.
+Run one router process and one upstream AWS provider process per region in the
+same Pod.
 
 The Cluster Autoscaler still connects to exactly one external gRPC endpoint. The
-gateway implements the upstream external gRPC `CloudProviderServer` API and fans
-out or routes requests to regional provider processes.
+router implements the upstream external gRPC `CloudProviderServer` API and fans
+out or routes requests to the regional provider workers over localhost.
 
-Each regional provider process builds exactly one upstream AWS provider with one
-`AWS_REGION`. Because each region has its own process, Kubernetes component-base
-metrics registries and Prometheus collectors are no longer shared across regions.
-Prometheus can attach the Kubernetes region label from the provider pod or
-service target to every scraped metric.
+Each provider worker builds exactly one upstream AWS provider with one
+`AWS_REGION`. The important isolation boundary is the process, not the region or
+the Pod. Multiple providers can share a Pod safely as long as each region still
+has its own process.
+
+This keeps the deployment operationally simple:
+
+- one Deployment
+- one Service for Cluster Autoscaler
+- one shared config file listing regional backends
+- localhost-only traffic between the router and provider workers
 
 ## Deployment
 
 ```mermaid
 flowchart TB
-  subgraph use1["us-east-1"]
-    subgraph cp["Kubernetes control plane nodes"]
-      api["kube-apiserver"]
-      sched["kube-scheduler"]
-      cm["kube-controller-manager"]
-    end
-
+  subgraph cp["Kubernetes control plane"]
+    api["kube-apiserver"]
     ca["cluster-autoscaler\n--cloud-provider=externalgrpc"]
-    gw["cluster-autoscaler-provider-gateway\nService: provider-gateway:8086"]
+    svc["Service: cluster-autoscaler-provider:8086"]
 
     api <--> ca
-    ca -- "external gRPC" --> gw
+    ca -- "external gRPC" --> svc
   end
 
-  subgraph euc1["eu-central-1"]
-    euc1_provider["cluster-autoscaler-provider-eu-central-1\nAWS_REGION=eu-central-1\ngRPC :8086\nmetrics :8087"]
-    euc1_asg_a["Auto Scaling Group\nworker-euc1-a"]
-    euc1_asg_b["Auto Scaling Group\nworker-euc1-b"]
-    euc1_nodes["worker nodes"]
+  subgraph pod["Pod: cluster-autoscaler-provider"]
+    router["router container\nmode=router\ngRPC :8086\nHTTP :8080\n/config/config.yaml"]
+    cfg["ConfigMap\nbackends:\n- us-east-1 -> :8081\n- us-west-2 -> :8082"]
+    use1_provider["provider-us-east-1 container\nmode=provider\nAWS region us-east-1\ngRPC :8081"]
+    usw2_provider["provider-us-west-2 container\nmode=provider\nAWS region us-west-2\ngRPC :8082"]
 
-    euc1_provider <--> euc1_asg_a
-    euc1_provider <--> euc1_asg_b
-    euc1_asg_a --> euc1_nodes
-    euc1_asg_b --> euc1_nodes
-    euc1_nodes --> api
+    svc -- "gRPC :8086" --> router
+    cfg --> router
+    cfg --> use1_provider
+    cfg --> usw2_provider
+    router -- "localhost gRPC" --> use1_provider
+    router -- "localhost gRPC" --> usw2_provider
   end
 
-  subgraph aps1["ap-southeast-1"]
-    aps1_provider["cluster-autoscaler-provider-ap-southeast-1\nAWS_REGION=ap-southeast-1\ngRPC :8086\nmetrics :8087"]
-    aps1_asg_a["Auto Scaling Group\nworker-aps1-a"]
-    aps1_asg_b["Auto Scaling Group\nworker-aps1-b"]
-    aps1_nodes["worker nodes"]
+  subgraph aws_use1["AWS us-east-1"]
+    use1_asg_a["Auto Scaling Group\nworker-use1-a"]
+    use1_asg_b["Auto Scaling Group\nworker-use1-b"]
+    use1_nodes["worker nodes"]
 
-    aps1_provider <--> aps1_asg_a
-    aps1_provider <--> aps1_asg_b
-    aps1_asg_a --> aps1_nodes
-    aps1_asg_b --> aps1_nodes
-    aps1_nodes --> api
+    use1_provider <--> use1_asg_a
+    use1_provider <--> use1_asg_b
+    use1_asg_a --> use1_nodes
+    use1_asg_b --> use1_nodes
+    use1_nodes --> api
   end
 
-  gw -- "regional gRPC" --> euc1_provider
-  gw -- "regional gRPC" --> aps1_provider
+  subgraph aws_usw2["AWS us-west-2"]
+    usw2_asg_a["Auto Scaling Group\nworker-usw2-a"]
+    usw2_asg_b["Auto Scaling Group\nworker-usw2-b"]
+    usw2_nodes["worker nodes"]
+
+    usw2_provider <--> usw2_asg_a
+    usw2_provider <--> usw2_asg_b
+    usw2_asg_a --> usw2_nodes
+    usw2_asg_b --> usw2_nodes
+    usw2_nodes --> api
+  end
 
   prom["Prometheus"]
-  prom -- "scrape /metrics\nregion=eu-central-1" --> euc1_provider
-  prom -- "scrape /metrics\nregion=ap-southeast-1" --> aps1_provider
-  prom -. "optional gateway metrics" .-> gw
+  prom -- "scrape /metrics" --> router
 ```
 
-## Gateway Behavior
+## Router Behavior
 
-The gateway owns multi-region composition. Regional provider processes remain
-thin wrappers around the upstream AWS provider.
+The router owns multi-region composition. Regional provider workers remain thin
+wrappers around the upstream AWS provider.
 
-Required gateway behavior:
+Required router behavior:
 
 - `NodeGroups`: call every regional provider and return the union.
 - Node group IDs: namespace returned node group IDs with the region, for example
-  `eu-central-1/asg-name`, so ASG name collisions are impossible.
+  `us-east-1/asg-name`, so ASG name collisions are impossible.
 - Node-group methods: route by the region prefix and strip the prefix before
-  forwarding to the regional provider.
+  forwarding to the matching provider worker.
 - Node-based methods: parse the AWS region from `node.Spec.ProviderID`, for
-  example `aws:///eu-central-1a/i-123`, then route to the matching regional
-  provider.
-- `Refresh`: fan out to all regional providers.
-- `Cleanup`: fan out to all regional providers.
+  example `aws:///us-east-1a/i-123`, then route to the matching provider
+  worker.
+- `Refresh`: fan out to all provider workers.
+- `Cleanup`: fan out to all provider workers.
+- Health checks: probe each worker and expose aggregate readiness and health on
+  the router HTTP port.
 
-## Regional Provider Behavior
+## Regional Provider Worker Behavior
 
-Each regional provider process should:
+Each provider worker process should:
 
 - Build exactly one upstream AWS provider.
 - Set region through normal AWS region resolution, preferably `AWS_REGION`.
-- Expose the external gRPC provider API on a regional service port.
-- Expose metrics on an explicit HTTP metrics port.
+- Listen only on its assigned localhost gRPC port from the shared config.
 - Avoid multi-region composition logic.
 
-This keeps upstream global state contained within one process per region.
+This keeps upstream global state contained within one process per region while
+still packaging all workers together in one Pod.
+
+## Configuration Model
+
+The shared config file defines the router's worker map. The current shape is:
+
+```yaml
+cacheTTL: 15s
+backends:
+  - provider: aws
+    region: us-east-1
+    port: 8081
+  - provider: aws
+    region: us-west-2
+    port: 8082
+```
+
+The router reads the full backend list. Each provider worker starts with
+`--region=<region>` and uses the matching backend entry to determine its listen
+port.
 
 ## Metrics
 
-This design gives per-region metrics through scrape target labels rather than
-through changes to upstream AWS metric definitions.
+This design still isolates upstream AWS provider metrics per process, which
+avoids the duplicate-registration panic.
 
-The regional provider Service or Pod should carry labels such as:
+In the current manifests, only the router exposes an HTTP port and Service for
+`/metrics`, `/healthz`, and `/ready`. That means Prometheus currently scrapes:
 
-```yaml
-app.kubernetes.io/name: cluster-autoscaler-provider
-app.kubernetes.io/component: regional-provider
-topology.kubernetes.io/region: eu-central-1
-```
+- router health and worker-count metrics
+- not the per-region upstream AWS provider metrics yet
 
-Prometheus can preserve or relabel `topology.kubernetes.io/region` into a plain
-`region` label at scrape time. Then queries can group AWS provider metrics by
-region:
-
-```promql
-sum by (region, endpoint, status) (
-  rate(cluster_autoscaler_aws_request_duration_seconds_count[5m])
-)
-```
+If per-region AWS metrics are required later, each provider worker will need its
+own scrapeable metrics endpoint or another explicit export path. The important
+point for the design is that separate provider processes make that possible
+without shared-registry conflicts.
 
 ## Alternatives
 
 ### Patch Upstream Metrics Registration
 
 Adding `sync.Once` around upstream AWS `RegisterMetrics` is still a good upstream
-fix because metric registration should be idempotent at package scope. This would
-prevent duplicate registration panics, but it would aggregate all AWS request
-metrics in one process unless upstream also adds a region label.
+fix because metric registration should be idempotent at package scope. This
+would prevent duplicate registration panics, but it would still aggregate all
+AWS request metrics in one process unless upstream also adds a region label.
 
 ### One Cluster Autoscaler Per Region
 
@@ -157,5 +180,5 @@ is operationally risky for this use case because every autoscaler observes the
 same unschedulable pods, which can lead to duplicated or less globally optimal
 scale-up decisions unless workloads are strictly region-constrained.
 
-The gateway design keeps one Cluster Autoscaler decision loop for the cluster
-while isolating regional AWS provider state and metrics in separate processes.
+The router-plus-workers design keeps one Cluster Autoscaler decision loop for
+the cluster while isolating regional AWS provider state in separate processes.

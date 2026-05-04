@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"slices"
 	"strings"
-	"sync"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -15,8 +13,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	klog "k8s.io/klog/v2"
 )
-
-var awsRegionEnvMu sync.Mutex
 
 type regionalProvider struct {
 	region   string
@@ -52,38 +48,6 @@ func parseAWSRegions(values []string) []string {
 	return slices.Compact(regions)
 }
 
-func buildProviderForRegion(
-	region string,
-	build func() cloudprovider.CloudProvider,
-) cloudprovider.CloudProvider {
-	awsRegionEnvMu.Lock()
-	defer awsRegionEnvMu.Unlock()
-	klog.Background().WithValues("region", region).Info("Building provider")
-
-	previous, hadPrevious := os.LookupEnv("AWS_REGION")
-	if err := os.Setenv("AWS_REGION", region); err != nil {
-		panic(fmt.Sprintf("failed to set AWS_REGION for %q: %v", region, err))
-	}
-	defer func() {
-		if hadPrevious {
-			_ = os.Setenv("AWS_REGION", previous)
-		} else {
-			_ = os.Unsetenv("AWS_REGION")
-		}
-
-		if r := recover(); r != nil {
-			klog.Background().WithValues("region", region).Error(nil, "Panic in building provider", "error", r)
-			panic(r)
-		}
-	}()
-
-	// Upstream's AWS provider is single-region and does not expose a public
-	// constructor that accepts an explicit region. We keep one upstream provider
-	// per region and scope region selection to construction time here rather than
-	// reaching into upstream internals via reflection.
-	return build()
-}
-
 func newMultiRegionCloudProvider(providers []regionalProvider) cloudprovider.CloudProvider {
 	if len(providers) == 1 {
 		return providers[0].provider
@@ -93,27 +57,6 @@ func newMultiRegionCloudProvider(providers []regionalProvider) cloudprovider.Clo
 		providers: providers,
 		primary:   providers[0].provider,
 	}
-}
-
-func regionFromProviderID(providerID string) string {
-	if !strings.HasPrefix(providerID, "aws:///") {
-		klog.Warningf("Failed to parse AWS region from providerID %q: does not have aws:/// prefix", providerID)
-		return ""
-	}
-
-	parts := strings.Split(strings.TrimPrefix(providerID, "aws:///"), "/")
-	if len(parts) < 2 {
-		klog.Warningf("Failed to parse AWS region from providerID %q: no zone info available", providerID)
-		return ""
-	}
-
-	zone := strings.TrimSpace(parts[0])
-	if len(zone) < 2 {
-		klog.Warningf("Failed to parse AWS region from providerID %q: zone %q is too short", providerID, zone)
-		return ""
-	}
-
-	return zone[:len(zone)-1]
 }
 
 func (p *multiRegionCloudProvider) providerForNode(node *apiv1.Node) cloudprovider.CloudProvider {

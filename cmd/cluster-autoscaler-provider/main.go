@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
+	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -38,10 +42,15 @@ func registerMultiStringFlag(name string, usage string) *multiStringFlag {
 }
 
 var (
-	address = flag.String("address", ":8086", "The address to expose the grpc service.")
-	keyCert = flag.String("key-cert", "", "The path to the certificate key file. Empty string for insecure communication.")
-	cert    = flag.String("cert", "", "The path to the certificate file. Empty string for insecure communication.")
-	cacert  = flag.String("ca-cert", "", "The path to the ca certificate file. Empty string for insecure communication.")
+	mode       = flag.String("mode", "provider", "Execution mode: 'router' or 'provider'.")
+	configPath = flag.String("config", "", "Path to the shared configuration file.")
+	region     = flag.String("region", "", "The AWS region this instance is responsible for (only used in 'provider' mode).")
+
+	routerAddress = flag.String("router-address", ":8086", "The address to expose the router gRPC service.")
+	httpAddress   = flag.String("http-address", ":8080", "The address to expose the router HTTP health and metrics service.")
+	keyCert       = flag.String("key-cert", "", "The path to the certificate key file. Empty string for insecure communication.")
+	cert          = flag.String("cert", "", "The path to the certificate file. Empty string for insecure communication.")
+	cacert        = flag.String("ca-cert", "", "The path to the ca certificate file. Empty string for insecure communication.")
 
 	cloudConfig = flag.String("cloud-config", "", "The path to the cloud provider configuration file. Empty string for no configuration file.")
 	clusterName = flag.String("cluster-name", "", "Autoscaled cluster name, if available.")
@@ -52,9 +61,6 @@ var (
 	nodeGroupAutoDiscoveryFlag = registerMultiStringFlag(
 		"node-group-auto-discovery",
 		"One or more definition(s) of node group auto-discovery. AWS matches by ASG tags, for example `asg:tag=tagKey,anotherTagKey`.")
-	awsRegionsFlag = registerMultiStringFlag(
-		"aws-region",
-		"One or more AWS regions to query. Can be repeated or provided as a comma-separated list. When omitted, the default AWS region resolution is used.")
 
 	awsUseStaticInstanceList = flag.Bool("aws-use-static-instance-list", false, "Use the generated static EC2 instance type list instead of calling AWS APIs at startup.")
 	dryRun                   = flag.Bool("dry-run", false, "Enable dry-run mode: initialize clients and serve gRPC, but log mutating actions instead of performing them.")
@@ -65,8 +71,43 @@ func main() {
 	kube_flag.InitFlags()
 	flag.Parse()
 
+	if *configPath == "" {
+		klog.Fatal("--config is required")
+	}
+
+	cfg, err := LoadConfig(*configPath)
+	if err != nil {
+		klog.Fatalf("failed to load config: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	switch *mode {
+	case "router":
+		runRouter(ctx, cfg)
+	case "provider":
+		runProvider(ctx, cfg)
+	default:
+		klog.Fatalf("invalid mode %q", *mode)
+	}
+}
+
+func runProvider(ctx context.Context, cfg *Config) {
+	if *region == "" {
+		klog.Fatal("--region is required in provider mode")
+	}
+
+	backend, err := cfg.GetBackendForRegion(*region)
+	if err != nil {
+		klog.Fatal(err)
+	}
+
+	listenAddr := fmt.Sprintf(":%d", backend.Port)
+	klog.Infof("starting provider mode for region=%s on %s; configured backends: %s", *region, listenAddr, cfg.Summary())
+
 	server := newServer()
-	provider := buildAWSCloudProvider()
+	provider := buildAWSCloudProvider(*region)
 	var grpcService protos.CloudProviderServer
 	grpcService = upstreamwrapper.NewCloudProviderGrpcWrapper(provider)
 	if *dryRun {
@@ -75,12 +116,54 @@ func main() {
 	}
 	protos.RegisterCloudProviderServer(server, grpcService)
 
-	listener, err := net.Listen("tcp", *address)
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		klog.Fatalf("failed to listen on %q: %v", *address, err)
+		klog.Fatalf("failed to listen on %q: %v", listenAddr, err)
 	}
 
-	klog.Infof("aws external-grpc cloudprovider service listening on %s", *address)
+	klog.Infof("aws regional cloudprovider service (%s) listening on %s", *region, listenAddr)
+
+	go func() {
+		<-ctx.Done()
+		server.GracefulStop()
+	}()
+
+	if err := server.Serve(listener); err != nil {
+		klog.Fatalf("failed to serve gRPC API: %v", err)
+	}
+}
+
+func runRouter(ctx context.Context, cfg *Config) {
+	klog.Infof("starting router mode on %s; configured backends: %s", *routerAddress, cfg.Summary())
+
+	router, err := newCachingRouter(cfg)
+	if err != nil {
+		klog.Fatalf("failed to create caching router: %v", err)
+	}
+	defer func() {
+		if err := router.Close(); err != nil {
+			klog.Errorf("failed to close router backend connections: %v", err)
+		}
+	}()
+	router.Start(ctx)
+
+	server := newServer()
+	protos.RegisterCloudProviderServer(server, router)
+
+	httpServer := newRouterHTTPServer(*httpAddress, router)
+	serveHTTPServer(ctx, httpServer, "router HTTP server")
+
+	listener, err := net.Listen("tcp", *routerAddress)
+	if err != nil {
+		klog.Fatalf("failed to listen on %q: %v", *routerAddress, err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		server.GracefulStop()
+	}()
+
+	klog.Infof("caching router listening on %s", *routerAddress)
 	if err := server.Serve(listener); err != nil {
 		klog.Fatalf("failed to serve gRPC API: %v", err)
 	}
@@ -114,7 +197,7 @@ func newServer() *grpc.Server {
 	return grpc.NewServer(grpc.Creds(transportCreds))
 }
 
-func buildAWSCloudProvider() cloudprovider.CloudProvider {
+func buildAWSCloudProvider(region string) cloudprovider.CloudProvider {
 	opts := &coreoptions.AutoscalerOptions{
 		AutoscalingOptions: config.AutoscalingOptions{
 			CloudProviderName:        cloudprovider.AwsProviderName,
@@ -133,21 +216,8 @@ func buildAWSCloudProvider() cloudprovider.CloudProvider {
 	}
 
 	resourceLimiter := cloudprovider.NewResourceLimiter(nil, nil)
-	regions := parseAWSRegions(*awsRegionsFlag)
-	if len(regions) == 0 {
+
+	return buildProviderForRegion(region, func() cloudprovider.CloudProvider {
 		return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
-	}
-
-	providers := make([]regionalProvider, 0, len(regions))
-	for _, region := range regions {
-		providers = append(providers, regionalProvider{
-			region: region,
-			provider: buildProviderForRegion(region, func() cloudprovider.CloudProvider {
-				return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
-			}),
-			log: klog.Background().WithValues("region", region),
-		})
-	}
-
-	return newMultiRegionCloudProvider(providers)
+	})
 }

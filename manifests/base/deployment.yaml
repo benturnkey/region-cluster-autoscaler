@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler-provider
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler-provider
+      app.kubernetes.io/name: cluster-autoscaler-provider
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler-provider
+        app.kubernetes.io/name: cluster-autoscaler-provider
+    spec:
+      serviceAccountName: cluster-autoscaler-provider
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: router
+          image: cluster-autoscaler-provider:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --v=4
+            - --stderrthreshold=info
+          env:
+            - name: CLUSTER_AUTOSCALER_PROVIDER_MODE
+              value: router
+            - name: CLUSTER_AUTOSCALER_PROVIDER_GRPC_ADDRESS
+              value: :8086
+            - name: CLUSTER_AUTOSCALER_PROVIDER_HTTP_ADDRESS
+              value: :8080
+          ports:
+            - name: grpc
+              containerPort: 8086
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 100m
+              memory: 300Mi

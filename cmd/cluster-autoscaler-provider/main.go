@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"flag"
 	"net"
 	"os"
-	"strings"
+	"os/signal"
+	"syscall"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -20,44 +23,28 @@ import (
 	klog "k8s.io/klog/v2"
 )
 
-type multiStringFlag []string
-
-func (f *multiStringFlag) String() string {
-	return "[" + strings.Join(*f, " ") + "]"
-}
-
-func (f *multiStringFlag) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-
-func registerMultiStringFlag(name string, usage string) *multiStringFlag {
-	value := new(multiStringFlag)
-	flag.Var(value, name, usage)
-	return value
-}
-
 var (
-	address = flag.String("address", ":8086", "The address to expose the grpc service.")
-	keyCert = flag.String("key-cert", "", "The path to the certificate key file. Empty string for insecure communication.")
-	cert    = flag.String("cert", "", "The path to the certificate file. Empty string for insecure communication.")
-	cacert  = flag.String("ca-cert", "", "The path to the ca certificate file. Empty string for insecure communication.")
+	mode        = flag.String("mode", stringEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_MODE", "provider"), "Execution mode: 'router' or 'provider'.")
+	configPath  = flag.String("config", stringEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_CONFIG", ""), "The path to the shared runtime configuration file.")
+	grpcAddress = flag.String("grpc-address", stringEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_GRPC_ADDRESS", ":8086"), "The address to expose the gRPC service.")
+	region      = flag.String("region", firstStringEnvDefault([]string{"CLUSTER_AUTOSCALER_PROVIDER_REGION", "AWS_REGION"}, ""), "The AWS region this instance is responsible for (only used in 'provider' mode).")
 
-	cloudConfig = flag.String("cloud-config", "", "The path to the cloud provider configuration file. Empty string for no configuration file.")
-	clusterName = flag.String("cluster-name", "", "Autoscaled cluster name, if available.")
+	routerHTTPAddress       = flag.String("http-address", stringEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_HTTP_ADDRESS", ":8080"), "The address to expose the router HTTP health and metrics service.")
+	routerCacheTTL          = flag.Duration("cache-ttl", durationEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_CACHE_TTL", defaultCacheTTL), "How long router NodeGroups results stay cached.")
+	routerBackendRPCTimeout = flag.Duration("backend-rpc-timeout", durationEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_BACKEND_RPC_TIMEOUT", defaultBackendRPCTimeout), "Timeout for router RPCs to provider backends.")
+	keyCert                 = flag.String("key-cert", firstStringEnvDefault([]string{"CLUSTER_AUTOSCALER_PROVIDER_KEY_CERT", "KEY_CERT"}, ""), "The path to the certificate key file. Empty string for insecure communication.")
+	cert                    = flag.String("cert", firstStringEnvDefault([]string{"CLUSTER_AUTOSCALER_PROVIDER_CERT", "CERT"}, ""), "The path to the certificate file. Empty string for insecure communication.")
+	cacert                  = flag.String("ca-cert", firstStringEnvDefault([]string{"CLUSTER_AUTOSCALER_PROVIDER_CA_CERT", "CA_CERT"}, ""), "The path to the ca certificate file. Empty string for insecure communication.")
+
+	cloudConfig = flag.String("cloud-config", firstStringEnvDefault([]string{"CLUSTER_AUTOSCALER_PROVIDER_CLOUD_CONFIG", "CLOUD_CONFIG"}, ""), "The path to the cloud provider configuration file. Empty string for no configuration file.")
 
 	nodeGroupsFlag = registerMultiStringFlag(
 		"nodes",
+		[]string{"CLUSTER_AUTOSCALER_PROVIDER_NODES"},
 		"Sets min,max size and other configuration data for a node group in a format accepted by the cloud provider. Can be used multiple times.")
-	nodeGroupAutoDiscoveryFlag = registerMultiStringFlag(
-		"node-group-auto-discovery",
-		"One or more definition(s) of node group auto-discovery. AWS matches by ASG tags, for example `asg:tag=tagKey,anotherTagKey`.")
-	awsRegionsFlag = registerMultiStringFlag(
-		"aws-region",
-		"One or more AWS regions to query. Can be repeated or provided as a comma-separated list. When omitted, the default AWS region resolution is used.")
 
-	awsUseStaticInstanceList = flag.Bool("aws-use-static-instance-list", false, "Use the generated static EC2 instance type list instead of calling AWS APIs at startup.")
-	dryRun                   = flag.Bool("dry-run", false, "Enable dry-run mode: initialize clients and serve gRPC, but log mutating actions instead of performing them.")
+	awsUseStaticInstanceList = flag.Bool("aws-use-static-instance-list", boolEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_AWS_USE_STATIC_INSTANCE_LIST", false), "Use the generated static EC2 instance type list instead of calling AWS APIs at startup.")
+	dryRun                   = flag.Bool("dry-run", boolEnvDefault("CLUSTER_AUTOSCALER_PROVIDER_DRY_RUN", false), "Enable dry-run mode: initialize clients and serve gRPC, but log mutating actions instead of performing them.")
 )
 
 func main() {
@@ -65,8 +52,47 @@ func main() {
 	kube_flag.InitFlags()
 	flag.Parse()
 
+	if *configPath == "" {
+		klog.Fatal("--config or CLUSTER_AUTOSCALER_PROVIDER_CONFIG is required")
+	}
+	runtimeConfig, err := loadRuntimeConfig(*configPath)
+	if err != nil {
+		klog.Fatalf("failed to load runtime config: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	switch *mode {
+	case "router":
+		runRouter(ctx, runtimeConfig)
+	case "provider":
+		runProvider(ctx, runtimeConfig)
+	default:
+		klog.Fatalf("invalid mode %q", *mode)
+	}
+}
+
+func runProvider(ctx context.Context, runtimeConfig *RuntimeConfig) {
+	if *region == "" {
+		klog.Fatal("provider mode requires a region selector")
+	}
+
+	settings := ProviderRuntimeSettings{Region: *region}
+	var err error
+	settings, err = runtimeConfig.ResolveProviderSettings(settings)
+	if err != nil {
+		klog.Fatalf("failed to resolve provider runtime settings: %v", err)
+	}
+
+	if settings.GRPCAddress == "" {
+		klog.Fatalf("runtime config does not define a gRPC listen address for region %q", settings.Region)
+	}
+
+	klog.Infof("starting provider mode for region=%s on %s", settings.Region, settings.GRPCAddress)
+
 	server := newServer()
-	provider := buildAWSCloudProvider()
+	provider := buildAWSCloudProvider(settings)
 	var grpcService protos.CloudProviderServer
 	grpcService = upstreamwrapper.NewCloudProviderGrpcWrapper(provider)
 	if *dryRun {
@@ -75,15 +101,88 @@ func main() {
 	}
 	protos.RegisterCloudProviderServer(server, grpcService)
 
-	listener, err := net.Listen("tcp", *address)
+	listener, err := net.Listen("tcp", settings.GRPCAddress)
 	if err != nil {
-		klog.Fatalf("failed to listen on %q: %v", *address, err)
+		klog.Fatalf("failed to listen on %q: %v", settings.GRPCAddress, err)
 	}
 
-	klog.Infof("aws external-grpc cloudprovider service listening on %s", *address)
+	klog.Infof("aws regional cloudprovider service (%s) listening on %s", settings.Region, settings.GRPCAddress)
+
+	go func() {
+		<-ctx.Done()
+		server.GracefulStop()
+	}()
+
 	if err := server.Serve(listener); err != nil {
 		klog.Fatalf("failed to serve gRPC API: %v", err)
 	}
+}
+
+func runRouter(ctx context.Context, runtimeConfig *RuntimeConfig) {
+	settings := RouterRuntimeSettings{
+		GRPCAddress:       *grpcAddress,
+		HTTPAddress:       *routerHTTPAddress,
+		CacheTTL:          *routerCacheTTL,
+		BackendRPCTimeout: *routerBackendRPCTimeout,
+	}
+
+	settings = runtimeConfig.ResolveRouterSettings(settings)
+	if err := validateRouterSettings(settings); err != nil {
+		klog.Fatalf("invalid router settings: %v", err)
+	}
+	if len(settings.Backends) == 0 {
+		klog.Fatal("at least one configured backend is required in router mode")
+	}
+
+	opts := RouterOptions{
+		CacheTTL:          settings.CacheTTL,
+		BackendRPCTimeout: settings.BackendRPCTimeout,
+		Backends:          settings.Backends,
+	}
+
+	klog.Infof("starting router mode on %s; configured backends: %s", settings.GRPCAddress, formatBackendSummary(opts.Backends))
+
+	router, err := newCachingRouter(opts)
+	if err != nil {
+		klog.Fatalf("failed to create caching router: %v", err)
+	}
+	defer func() {
+		if err := router.Close(); err != nil {
+			klog.Errorf("failed to close router backend connections: %v", err)
+		}
+	}()
+	router.Start(ctx)
+
+	server := newServer()
+	protos.RegisterCloudProviderServer(server, router)
+
+	httpServer := newRouterHTTPServer(settings.HTTPAddress, router)
+	serveHTTPServer(ctx, httpServer, "router HTTP server")
+
+	listener, err := net.Listen("tcp", settings.GRPCAddress)
+	if err != nil {
+		klog.Fatalf("failed to listen on %q: %v", settings.GRPCAddress, err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		server.GracefulStop()
+	}()
+
+	klog.Infof("caching router listening on %s", settings.GRPCAddress)
+	if err := server.Serve(listener); err != nil {
+		klog.Fatalf("failed to serve gRPC API: %v", err)
+	}
+}
+
+func validateRouterSettings(settings RouterRuntimeSettings) error {
+	if settings.CacheTTL <= 0 {
+		return fmt.Errorf("cache TTL must be greater than zero")
+	}
+	if settings.BackendRPCTimeout <= 0 {
+		return fmt.Errorf("backend RPC timeout must be greater than zero")
+	}
+	return nil
 }
 
 func newServer() *grpc.Server {
@@ -114,16 +213,18 @@ func newServer() *grpc.Server {
 	return grpc.NewServer(grpc.Creds(transportCreds))
 }
 
-func buildAWSCloudProvider() cloudprovider.CloudProvider {
+func buildAWSCloudProvider(settings ProviderRuntimeSettings) cloudprovider.CloudProvider {
 	opts := &coreoptions.AutoscalerOptions{
 		AutoscalingOptions: config.AutoscalingOptions{
-			CloudProviderName:        cloudprovider.AwsProviderName,
-			CloudConfig:              *cloudConfig,
-			NodeGroupAutoDiscovery:   *nodeGroupAutoDiscoveryFlag,
-			NodeGroups:               *nodeGroupsFlag,
-			ClusterName:              *clusterName,
-			AWSUseStaticInstanceList: *awsUseStaticInstanceList,
-			UserAgent:                "aws-cluster-autoscaler-external-grpc",
+			CloudProviderName:         cloudprovider.AwsProviderName,
+			CloudConfig:               *cloudConfig,
+			NodeGroupAutoDiscovery:    settings.NodeGroupAutoDiscovery,
+			NodeGroups:                nodeGroupsFlag.Values(),
+			ClusterName:               settings.ClusterName,
+			AWSUseStaticInstanceList:  *awsUseStaticInstanceList,
+			UserAgent:                 "aws-cluster-autoscaler-external-grpc",
+			SkipNodesWithLocalStorage: settings.SkipNodesWithLocalStorage,
+			SkipNodesWithSystemPods:   settings.SkipNodesWithSystemPods,
 		},
 	}
 
@@ -133,21 +234,8 @@ func buildAWSCloudProvider() cloudprovider.CloudProvider {
 	}
 
 	resourceLimiter := cloudprovider.NewResourceLimiter(nil, nil)
-	regions := parseAWSRegions(*awsRegionsFlag)
-	if len(regions) == 0 {
+
+	return buildProviderForRegion(settings.Region, func() cloudprovider.CloudProvider {
 		return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
-	}
-
-	providers := make([]regionalProvider, 0, len(regions))
-	for _, region := range regions {
-		providers = append(providers, regionalProvider{
-			region: region,
-			provider: buildProviderForRegion(region, func() cloudprovider.CloudProvider {
-				return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
-			}),
-			log: klog.Background().WithValues("region", region),
-		})
-	}
-
-	return newMultiRegionCloudProvider(providers)
+	})
 }

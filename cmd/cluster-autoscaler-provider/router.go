@@ -206,11 +206,9 @@ func (r *CachingRouter) probeProviders(ctx context.Context) {
 
 	for result := range results {
 		if result.err != nil {
-			klog.Errorf("provider probe failed for region %s: %v", result.region, result.err)
 			r.markProviderUnhealthy(result.region, result.err)
 			continue
 		}
-		klog.Infof("provider probe succeeded for region %s", result.region)
 		r.markProviderHealthy(result.region)
 	}
 }
@@ -295,10 +293,14 @@ func (r *CachingRouter) markProviderHealthy(region string) {
 	defer r.mu.Unlock()
 
 	status := r.providerState[region]
+	wasHealthy := status.healthy
 	status.healthy = true
 	status.lastChecked = time.Now()
 	status.lastError = ""
 	r.providerState[region] = status
+	if !wasHealthy {
+		klog.Infof("provider connected for region %s", region)
+	}
 	r.updateProviderMetricsLocked()
 }
 
@@ -307,12 +309,16 @@ func (r *CachingRouter) markProviderUnhealthy(region string, err error) {
 	defer r.mu.Unlock()
 
 	status := r.providerState[region]
+	wasHealthy := status.healthy
 	status.healthy = false
 	status.lastChecked = time.Now()
 	if err != nil {
 		status.lastError = err.Error()
 	}
 	r.providerState[region] = status
+	if wasHealthy && err != nil {
+		klog.Errorf("provider connection lost for region %s: %v", region, err)
+	}
 
 	healthy := 0
 	for _, provider := range r.providerState {

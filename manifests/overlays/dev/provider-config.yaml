@@ -1,0 +1,14 @@
+router:
+  grpcAddress: :8086
+  httpAddress: :8080
+  cacheTTL: 15s
+  backendRPCTimeout: 5s
+providerDefaults:
+  clusterName: dev
+  nodeGroupAutoDiscovery:
+    - asg:tag=k8s.io/cluster-autoscaler/dev
+providers:
+  us-east-1:
+    port: 8081
+  us-west-2:
+    port: 8082

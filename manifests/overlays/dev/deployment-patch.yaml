@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler-provider
+spec:
+  template:
+    spec:
+      volumes:
+        - name: runtime-config
+          configMap:
+            name: cluster-autoscaler-provider-config
+      containers:
+        - name: router
+          volumeMounts:
+            - name: runtime-config
+              mountPath: /etc/cluster-autoscaler-provider
+              readOnly: true
+          env:
+            - name: CLUSTER_AUTOSCALER_PROVIDER_CONFIG
+              value: /etc/cluster-autoscaler-provider/config.yaml
+        - name: provider-us-east-1
+          image: cluster-autoscaler-provider:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --v=4
+            - --stderrthreshold=info
+          env:
+            - name: CLUSTER_AUTOSCALER_PROVIDER_MODE
+              value: provider
+            - name: CLUSTER_AUTOSCALER_PROVIDER_CONFIG
+              value: /etc/cluster-autoscaler-provider/config.yaml
+            - name: CLUSTER_AUTOSCALER_PROVIDER_REGION
+              value: us-east-1
+          volumeMounts:
+            - name: runtime-config
+              mountPath: /etc/cluster-autoscaler-provider
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 100m
+              memory: 300Mi
+        - name: provider-us-west-2
+          image: cluster-autoscaler-provider:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --v=4
+            - --stderrthreshold=info
+          env:
+            - name: CLUSTER_AUTOSCALER_PROVIDER_MODE
+              value: provider
+            - name: CLUSTER_AUTOSCALER_PROVIDER_CONFIG
+              value: /etc/cluster-autoscaler-provider/config.yaml
+            - name: CLUSTER_AUTOSCALER_PROVIDER_REGION
+              value: us-west-2
+          volumeMounts:
+            - name: runtime-config
+              mountPath: /etc/cluster-autoscaler-provider
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              cpu: 100m
+              memory: 300Mi

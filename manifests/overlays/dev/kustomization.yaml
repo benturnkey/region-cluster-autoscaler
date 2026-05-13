@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+configMapGenerator:
+  - name: cluster-autoscaler-provider-config
+    files:
+      - config.yaml=provider-config.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - path: deployment-patch.yaml
+  - path: serviceaccount-patch.yaml
+images:
+  - name: cluster-autoscaler-provider
+    newName: ghcr.io/tkhq/cluster-autoscaler-provider
+    newTag: sha256@fb1f73e908c4f379b0410f09dd0d7057ca003e9611dcfb91fa15082495582f5c
+

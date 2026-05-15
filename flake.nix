@@ -17,12 +17,17 @@
             gopls
             gotools
             golangci-lint
+            nodejs
             setup-envtest
             gh
           ];
 
           shellHook = ''
             export KUBEBUILDER_ASSETS="$(setup-envtest use 1.35.0 -p path)"
+            if [ -f package-lock.json ] && [ ! -d node_modules/release-please ]; then
+              echo "installing npm dependencies from package-lock.json"
+              npm ci
+            fi
           '';
 
         };

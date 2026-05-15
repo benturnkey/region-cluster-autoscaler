@@ -3,11 +3,9 @@ kind: Service
 metadata:
   name: cluster-autoscaler-provider
   labels:
-    app: cluster-autoscaler-provider
     app.kubernetes.io/name: cluster-autoscaler-provider
 spec:
   selector:
-    app: cluster-autoscaler-provider
     app.kubernetes.io/name: cluster-autoscaler-provider
   ports:
     - name: grpc

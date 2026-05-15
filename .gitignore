@@ -3,3 +3,4 @@
 /bin/
 PROMPT.md
 cluster-autoscaler-provider
+node_modules/

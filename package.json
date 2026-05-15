@@ -1,0 +1,7 @@
+{
+  "name": "cluster-autoscaler-provider",
+  "private": true,
+  "devDependencies": {
+    "release-please": "^17.6.0"
+  }
+}

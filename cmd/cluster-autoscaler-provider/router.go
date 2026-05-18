@@ -410,7 +410,7 @@ func (r *CachingRouter) NodeGroupForNode(ctx context.Context, req *protos.NodeGr
 	callCtx, cancel := r.backendContext(ctx, client)
 	defer cancel()
 
-	klog.V(2).Infof("node group lookup sent to provider=%s region=%s node=%s providerID=%s", client.provider, client.region, req.GetNode().GetName(), req.GetNode().GetProviderID())
+	klog.V(6).Infof("node group lookup sent to provider=%s region=%s node=%s providerID=%s", client.provider, client.region, req.GetNode().GetName(), req.GetNode().GetProviderID())
 	resp, err := client.client.NodeGroupForNode(callCtx, req)
 	if err != nil {
 		klog.Errorf("node group lookup failed for provider=%s region=%s node=%s providerID=%s: %v", client.provider, client.region, req.GetNode().GetName(), req.GetNode().GetProviderID(), err)

@@ -235,7 +235,7 @@ func buildAWSCloudProvider(settings ProviderRuntimeSettings) cloudprovider.Cloud
 
 	resourceLimiter := cloudprovider.NewResourceLimiter(nil, nil)
 
-	return buildProviderForRegion(settings.Region, func() cloudprovider.CloudProvider {
+	return newCleanupOnceProvider(buildProviderForRegion(settings.Region, func() cloudprovider.CloudProvider {
 		return upstreamaws.BuildAWS(opts, discovery, resourceLimiter)
-	})
+	}))
 }
